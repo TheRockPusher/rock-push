@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+SROOT=
 MODEL=${EVAL_MODEL:-smol}
 JUDGE_MODEL=${EVAL_JUDGE_MODEL:-smol}
 ARMS=none,head,work
@@ -16,6 +17,7 @@ usage() {
     cat <<'EOF'
 Usage: scripts/eval.sh <skill> [options]
 
+  --root DIR            Skills root (default: auto-detect project or central root)
   --arms none,head,work  Comma-separated arms (default: none,head,work)
   --repeat N            Repeats per prompt and arm (default: 3)
   --model M             Agent model (default: EVAL_MODEL or smol)
@@ -26,7 +28,10 @@ Usage: scripts/eval.sh <skill> [options]
   --keep                Preserve complete run projects in the results
   --help                Show this help
 
-Results are written to evals/.results/<UTC timestamp>-<skill>/.
+Without --root, use <project git toplevel>/.agents when run inside a different
+git repository containing .agents/skills/<skill>/SKILL.md; otherwise use the
+central repository containing this script.
+Results are written to <resolved root>/evals/.results/<UTC timestamp>-<skill>/.
 Exit codes: 0 = no regression, 1 = work has fewer passes than head,
 2 = invalid input or missing prerequisite. Individual failing evaluations
 are reported but do not cause exit 1 unless they regress against head.
@@ -39,6 +44,7 @@ need_value() { [[ $# -ge 2 && -n $2 && $2 != --* ]] || error "missing value for 
 while (($#)); do
     case $1 in
         --help|-h) usage; exit 0 ;;
+        --root) need_value "$@"; SROOT=$2; shift 2 ;;
         --arms) need_value "$@"; ARMS=$2; shift 2 ;;
         --repeat) need_value "$@"; REPEAT=$2; shift 2 ;;
         --model) need_value "$@"; MODEL=$2; shift 2 ;;
@@ -66,11 +72,23 @@ done
 for tool in python3 omp git; do
     command -v "$tool" >/dev/null 2>&1 || error "required executable not found on PATH: $tool"
 done
-[[ -d $ROOT/skills/$SKILL ]] || error "skill directory does not exist: skills/$SKILL"
-[[ -f $ROOT/skills/$SKILL/SKILL.md ]] || error "skill entrypoint does not exist: skills/$SKILL/SKILL.md"
-SPEC_DIR=$ROOT/evals/$SKILL
+if [[ -z $SROOT ]]; then
+    SROOT=$ROOT
+    if PROJECT=$(git rev-parse --show-toplevel 2>/dev/null) \
+        && [[ $PROJECT != "$ROOT" && -f $PROJECT/.agents/skills/$SKILL/SKILL.md ]]; then
+        SROOT=$PROJECT/.agents
+    fi
+fi
+[[ -d $SROOT ]] || error "skills root is not a directory: $SROOT"
+SROOT=$(realpath -e -- "$SROOT") || error "could not resolve skills root: $SROOT"
+if [[ $SROOT != "$ROOT" && -e $ROOT/skills/$SKILL ]]; then
+    error "$SKILL exists in both $SROOT and $ROOT: promote or rename one"
+fi
+[[ -d $SROOT/skills/$SKILL ]] || error "skill directory does not exist: $SROOT/skills/$SKILL"
+[[ -f $SROOT/skills/$SKILL/SKILL.md ]] || error "skill entrypoint does not exist: $SROOT/skills/$SKILL/SKILL.md"
+SPEC_DIR=$SROOT/evals/$SKILL
 SPEC=$SPEC_DIR/evals.json
-[[ -f $SPEC ]] || error "eval spec does not exist: evals/$SKILL/evals.json"
+[[ -f $SPEC ]] || error "eval spec does not exist: $SPEC"
 
 # Keep JSON handling in one stdlib-only helper; the shell owns run orchestration.
 json_tool() {
@@ -305,10 +323,10 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 HEAD_SOURCE=
 if [[ ,$ARMS, == *,head,* ]]; then
-    if git -C "$ROOT" cat-file -e "HEAD:skills/$SKILL/SKILL.md" 2>/dev/null; then
+    if git -C "$SROOT" cat-file -e "HEAD:./skills/$SKILL/SKILL.md" 2>/dev/null; then
         mkdir -p "$TEMP_ROOT/head"
-        if ! git -C "$ROOT" archive HEAD "skills/$SKILL" | tar -x -C "$TEMP_ROOT/head"; then
-            error "could not extract HEAD version of skills/$SKILL"
+        if ! git -C "$SROOT" archive HEAD "skills/$SKILL" | tar -x -C "$TEMP_ROOT/head"; then
+            error "could not extract HEAD version of $SROOT/skills/$SKILL"
         fi
         HEAD_SOURCE=$TEMP_ROOT/head/skills/$SKILL
     else
@@ -316,16 +334,20 @@ if [[ ,$ARMS, == *,head,* ]]; then
     fi
 fi
 STAMP=$(date -u +%Y%m%dT%H%M%S%NZ)
-RESULTS=$ROOT/evals/.results/$STAMP-$SKILL
+RESULTS=$SROOT/evals/.results/$STAMP-$SKILL
 mkdir -p "$RESULTS"
+if [[ ! -e $SROOT/evals/.results/.gitignore ]]; then
+    printf '*\n' > "$SROOT/evals/.results/.gitignore"
+fi
 if ! OMP_VERSION=$(omp --version 2>&1); then
     error 'could not determine omp version'
 fi
 {
     printf 'skill=%s\nmodel=%s\njudge=%s\njudge_model=%s\n' "$SKILL" "$MODEL" "$JUDGE" "$JUDGE_MODEL"
+    printf 'root=%s\n' "$SROOT"
     printf 'arms=%s\nrepeat=%s\nonly=%s\nmax_time=%s\nkeep=%s\n' "$ARMS" "$REPEAT" "$ONLY" "$MAX_TIME" "$KEEP"
     printf 'utc_timestamp=%s\nomp_version=%s\n' "$STAMP" "$OMP_VERSION"
-    if [[ -n $HEAD_SOURCE ]]; then printf 'head_commit=%s\n' "$(git -C "$ROOT" rev-parse HEAD)"; fi
+    if [[ -n $HEAD_SOURCE ]]; then printf 'head_commit=%s\n' "$(git -C "$SROOT" rev-parse HEAD)"; fi
 } > "$RESULTS/meta.txt"
 : > "$RESULTS/verdicts.tsv"
 
@@ -379,11 +401,12 @@ run_case() {
     if [[ $arm == none ]]; then
         skill_flags=(--no-skills)
     else
-        source=$ROOT/skills/$SKILL
+        source=$SROOT/skills/$SKILL
         [[ $arm != head ]] || source=$HEAD_SOURCE
         mkdir -p "$rundir/.omp/skills/$SKILL"
         cp -a -- "$source/." "$rundir/.omp/skills/$SKILL/"
-        # Trigger evaluation deliberately leaves global competing skills visible.
+        printf 'disabledProviders:\n  - agents\n' > "$rundir/.omp/config.yml"
+        # Trigger evaluation leaves other providers visible, but excludes ~/.agents skills.
         if [[ $kind == outcome ]]; then skill_flags=(--skills "$SKILL"); fi
     fi
     if ! git -C "$rundir" init -q; then error "could not initialize run project: $rundir"; fi

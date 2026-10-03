@@ -27,7 +27,8 @@ CODE_SPAN = re.compile(r"(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)", re.DOTALL)
 
 
 class Validator:
-    def __init__(self):
+    def __init__(self, root=ROOT):
+        self.root = root
         self.errors = 0
         self.warnings = 0
 
@@ -36,7 +37,7 @@ class Validator:
             self.warnings += 1
         else:
             self.errors += 1
-        print(f"{'WARN' if warning else 'ERROR'} {path.relative_to(ROOT)}: {message}")
+        print(f"{'WARN' if warning else 'ERROR'} {path.relative_to(self.root)}: {message}")
 
     def read_text(self, path):
         try:
@@ -235,18 +236,21 @@ def directories(path):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", type=Path, default=ROOT, metavar="DIR",
+                        help="skills root (defaults to this repository)")
     parser.add_argument("skills", nargs="*", metavar="SKILL", help="restrict validation to these skill names")
     args = parser.parse_args()
-    validator = Validator()
-    skills = directories(ROOT / "skills")
-    suites = directories(ROOT / "evals")
+    root = args.root.resolve()
+    validator = Validator(root)
+    skills = directories(root / "skills")
+    suites = directories(root / "evals")
     if args.skills:
         requested = set(args.skills)
         for name in sorted(requested):
             if not NAME.fullmatch(name) or len(name) > 64:
-                validator.problem(ROOT / "skills", f"invalid requested skill name: {name!r}")
+                validator.problem(root / "skills", f"invalid requested skill name: {name!r}")
             elif name not in skills and name not in suites:
-                validator.problem(ROOT / "skills" / name, "requested skill does not exist")
+                validator.problem(root / "skills" / name, "requested skill does not exist")
         skills = {name: path for name, path in skills.items() if name in requested}
         suites = {name: path for name, path in suites.items() if name in requested}
     for name, directory in skills.items():

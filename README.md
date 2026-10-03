@@ -14,6 +14,7 @@ evals/.results/                # gitignored run output
 scripts/validate.py            # static checks
 scripts/link.sh                # symlink skills into agent skill directories
 scripts/eval.sh                # behavioral evals via headless omp
+scripts/promote.sh             # move an incubating skill to the central checkout
 .github/workflows/validate.yml # CI: validate only
 README.md
 CHANGELOG.md
@@ -24,7 +25,7 @@ AGENTS.md
 
 There are no skills yet; installation becomes useful once the catalog has entries.
 
-### A. Live global checkout
+### Live global checkout
 
 Clone to a stable path and link the skills:
 
@@ -35,30 +36,26 @@ scripts/link.sh                            # ~/.agents/skills: omp / Codex
 scripts/link.sh --target ~/.claude/skills   # Claude Code
 ```
 
-These are symlinks: edits to installed skills from any project land in this checkout. Commit them here, and run `git pull` in the checkout on other machines to receive updates.
+These are symlinks: edits to installed skills from any project land in this checkout. On other machines, run `git pull` in the checkout and `scripts/link.sh` to receive updates.
 
-### B. Project-pinned copy
+No checkout? `npx skills add TheRockPusher/rock-push --skill <name>` gives a read-only copy with no flow-back.
 
-From the consuming project, install a copy rather than a live link:
+## Lifecycle
 
-```sh
-npx skills add TheRockPusher/rock-push --skill <name> --copy
-```
-
-Commit the installed copy and lockfile, if generated, with the project; update it deliberately.
-
-Never keep a differing same-name skill copy in a project alongside a global installation. Omp namespaces collisions instead of replacing all variants; give project-specific variants their own name, including their directory and frontmatter.
-
-## Workflow
+**One skill, one place:** it lives in a project's `.agents` root while incubating or in this central checkout after promotion, never both. Project-only variants get a different name; skills that only make sense in one project are never promoted.
 
 Requirements: Python 3 with PyYAML (`pip install pyyaml`) for validation; Python 3 and `omp` on `PATH` for behavioral evals.
 
-1. Edit the skill and its evals.
-2. Run `python scripts/validate.py`.
-3. Run `scripts/eval.sh <skill>` to compare `none` (no skills), `head` (committed skill), and `work` (working-tree skill).
-4. Require no regression (`work` ≥ `head`), add a CHANGELOG entry, then commit.
+1. **Incubate.** Create `<project>/.agents/skills/<name>/SKILL.md` and `<project>/.agents/evals/<name>/` with its spec, fixtures, and checks; commit both in the project's Git repository. Omp and Codex discover the project skill natively. For optional Claude Code exposure, run from the project root:
+   ```sh
+   mkdir -p .claude/skills
+   ln -s ../../.agents/skills/<name> .claude/skills/<name>
+   ```
+2. **Evaluate in place.** From the project, run `~/src/rock-push/scripts/eval.sh <name>`; it automatically uses the project's `.agents` root, comparing the project's `HEAD` and working tree. Before the first project commit, use `--arms none,work`. Validate with `python ~/src/rock-push/scripts/validate.py --root <project>/.agents <name>`.
+3. **Promote.** From the project, run `~/src/rock-push/scripts/promote.sh <name>`. It moves the skill and evals into the central checkout, removes the project copy, and links the skill globally. Commit the removal in the project and the addition in the central checkout, then push central.
+4. **Improve.** From any project, edit through the global symlink into the central checkout. Evaluate there with `scripts/eval.sh <name>`, require no regression (`work` ≥ `head`), update the CHANGELOG, and commit/push there.
 
-CI runs static validation only; behavioral evaluation is a local, model-backed check. See `scripts/eval.sh --help` for options, including optional LLM judging of expectations.
+CI runs static validation only; behavioral evaluation is a local, model-backed check. See `scripts/eval.sh --help` for options, including `--root DIR` and optional LLM judging of expectations.
 
 ## Authoring rules
 

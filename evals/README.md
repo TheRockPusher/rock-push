@@ -4,6 +4,17 @@ Keep evaluations outside the distributed `skills/` directory. Each skill can hav
 an `evals/<name>/evals.json` file with trigger prompts, outcome cases, or both.
 The matching `skills/<name>/` directory must exist.
 
+## Skills roots
+
+A skills root contains `skills/<name>/SKILL.md` and
+`evals/<name>/{evals.json,fixtures/,checks/}`. The central root is this repository;
+an incubating skill's root is `<project git toplevel>/.agents`, committed in the
+project. A skill must live in only one root; promote it with `scripts/promote.sh`
+or give a differing project variant another name.
+
+`scripts/validate.py --root DIR [skill...]` validates any skills root, showing
+paths relative to that root; without `--root`, it validates the central root.
+
 ## Spec format
 
 This example is valid JSON; its referenced fixture and checker must also exist:
@@ -73,8 +84,13 @@ Malformed judge replies fail closed. Expectations-only cases are marked
 ## Arms and invocation
 
 The runner requires Bash, `python3`, `git`, and `omp` on `PATH` (plus standard Unix
-utilities). It resolves repository paths from its own location, not your current
-directory. Arms run sequentially:
+utilities). `--root DIR` explicitly selects a skills root. Otherwise, when run
+inside another Git repository containing `.agents/skills/<skill>/SKILL.md`, it
+uses that project's `.agents` root; otherwise it uses the central root. For a
+project root, head comes from the project's `HEAD` and work from its working
+tree. If the skill also exists centrally, the runner exits **2** with
+`<skill> exists in both <project root> and <central>: promote or rename one`.
+Arms run sequentially:
 
 - **none**: no skills, using `--no-skills`; the outcome baseline.
 - **head**: the skill directory from `HEAD`, including its auxiliary files. If
@@ -83,10 +99,13 @@ directory. Arms run sequentially:
 
 For outcomes, head/work install their skill under the temporary project's
 `.omp/skills/<name>/` and use `--skills <name>`. For triggers, only head/work run,
-without a skill filter so global skills can compete. A trigger is observed when
-`skill://<name>` appears in the event stream; positive prompts must trigger it,
-and negative prompts must not. Project skill copies outrank global copies with
-the same name.
+without a skill filter. A trigger is observed when `skill://<name>` appears in
+the event stream; positive prompts must trigger it, and negative prompts must
+not. Runs disable the `agents` discovery provider via a per-run
+`.omp/config.yml` (`disabledProviders: [agents]`) so live-linked global skills
+in `~/.agents/skills` can neither shadow nor compete with the arm under test.
+Trigger runs therefore measure the skill's own description against prompts,
+not competition with other global skills.
 
 ```bash
 # All arms, three repeats per prompt, model smol (or EVAL_MODEL).
@@ -101,6 +120,12 @@ scripts/eval.sh example-skill --only trigger --arms head,work --repeat 5
 # Preserve full projects for outcome debugging.
 scripts/eval.sh example-skill --only outcome --arms none,work --repeat 1 --keep
 
+# From an incubating project; use none/work before its first skill commit.
+~/src/rock-push/scripts/eval.sh example-skill --arms none,work
+
+# Select a skills root explicitly.
+scripts/eval.sh example-skill --root /path/to/project/.agents
+
 scripts/eval.sh --help
 ```
 
@@ -110,7 +135,8 @@ the default judge model. Both otherwise default to `smol`.
 
 ## Results and decisions
 
-Each invocation writes a gitignored `evals/.results/<UTC timestamp>-<skill>/`:
+Each invocation writes to `<root>/evals/.results/<UTC timestamp>-<skill>/`.
+The results directory is self-gitignored, including in project roots:
 
 - `meta.txt`: model names, runner options, `omp --version`, and the HEAD commit
   when that arm is available.
